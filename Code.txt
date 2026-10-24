@@ -1,0 +1,1245 @@
+
+import os
+import shutil
+import tkinter as tk
+from tkinter import messagebox
+from datetime import datetime
+
+import customtkinter as ctk
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(BASE_DIR, "students.csv")
+
+SUBJECTS = [
+    "Data Structures and Algorithm",
+    "Python Programming",
+    "Digital and Logic Microprocessors",
+    "Computer Organisation and Architecture",
+    "Discrete Structures"
+]
+
+COLUMNS = ["ID", "Name", "Attendance"] + SUBJECTS
+
+OLD_SUBJECTS = ["Python", "Maths", "English", "Science", "Computer"]
+
+ALIASES = {
+    "Student ID": "ID",
+    "Attendance (%)": "Attendance",
+    "Student Name": "Name"
+}
+
+BG = "#0B1020"
+SIDEBAR = "#10182B"
+PANEL = "#151F35"
+PANEL2 = "#1C2942"
+ACCENT = "#6C8CFF"
+CYAN = "#43D9D3"
+TEXT = "#F2F5FF"
+MUTED = "#9AA9C5"
+GREEN = "#48D597"
+RED = "#FF6B81"
+PURPLE = "#B58CFF"
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+# ============================================================
+# CSV MANAGEMENT
+# ============================================================
+
+def ensure_csv():
+    if not os.path.exists(CSV_FILE):
+        pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
+
+
+def backup_csv():
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = CSV_FILE + ".backup_" + stamp
+    counter = 2
+
+    while os.path.exists(backup):
+        backup = CSV_FILE + f".backup_{stamp}_{counter}"
+        counter += 1
+
+    shutil.copy2(CSV_FILE, backup)
+    return backup
+
+
+def normalize_id(value):
+    """Preserve text IDs such as STU001 and normalize numeric IDs."""
+    value = str(value).strip()
+
+    if not value or value.lower() in ("nan", "none"):
+        raise ValueError("Student ID cannot be empty.")
+
+    return value
+
+
+def load_students():
+    ensure_csv()
+
+    try:
+        df = pd.read_csv(CSV_FILE, encoding="utf-8-sig", dtype=str)
+    except Exception as exc:
+        messagebox.showerror(
+            "CSV Error",
+            f"Unable to read:\n{CSV_FILE}\n\n{exc}"
+        )
+        return pd.DataFrame(columns=COLUMNS)
+
+    df.columns = df.columns.astype(str).str.strip()
+    df = df.rename(columns=ALIASES)
+
+    # Remove common spreadsheet index columns.
+    df = df.loc[
+        :,
+        ~df.columns.str.match(r"^(Unnamed:.*|index)$", case=False)
+    ]
+
+    # Remove calculated fields that are not inputs to this application.
+    extra_columns = [
+        "Total", "Percentage", "Grade",
+        "Average", "Result", "Predicted Percentage"
+    ]
+    df = df.drop(
+        columns=[col for col in extra_columns if col in df.columns],
+        errors="ignore"
+    )
+
+    # Recognize the previous CSV format and migrate only after confirmation.
+    if not all(col in df.columns for col in COLUMNS):
+        old_columns = ["ID", "Name", "Attendance"] + OLD_SUBJECTS
+
+        if not all(col in df.columns for col in old_columns):
+            messagebox.showerror(
+                "Unrecognized CSV Format",
+                "Could not recognize students.csv headers.\n\n"
+                "Headers found:\n"
+                + ", ".join(map(str, df.columns))
+                + "\n\nThe original CSV has not been overwritten."
+            )
+            return pd.DataFrame(columns=COLUMNS)
+
+        proceed = messagebox.askyesno(
+            "Legacy CSV Detected",
+            "The CSV uses the old subject names:\n"
+            + ", ".join(OLD_SUBJECTS)
+            + "\n\nA backup will be created before migration. "
+            "The old subject columns will be mapped in their existing order "
+            "to the new subjects.\n\n"
+            "Continue only if this mapping is appropriate for your demo data."
+        )
+
+        if not proceed:
+            return pd.DataFrame(columns=COLUMNS)
+
+        try:
+            migrated = df.rename(
+                columns=dict(zip(OLD_SUBJECTS, SUBJECTS))
+            )
+            migrated = migrated[COLUMNS].copy()
+
+            migrated["ID"] = migrated["ID"].apply(normalize_id)
+            migrated["Name"] = migrated["Name"].fillna("").astype(str).str.strip()
+
+            if migrated["Name"].eq("").any():
+                raise ValueError("A student name is empty.")
+
+            if migrated["ID"].duplicated().any():
+                raise ValueError("Duplicate student IDs were found.")
+
+            for col in ["Attendance"] + SUBJECTS:
+                migrated[col] = pd.to_numeric(migrated[col], errors="raise")
+                if not migrated[col].between(0, 100).all():
+                    raise ValueError(
+                        f"Values in {col} must be between 0 and 100."
+                    )
+
+            backup = backup_csv()
+
+            temp_path = CSV_FILE + ".migration_tmp"
+            try:
+                migrated.to_csv(temp_path, index=False)
+                os.replace(temp_path, CSV_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            df = migrated
+
+            messagebox.showinfo(
+                "Migration Complete",
+                f"CSV updated successfully.\n\nBackup saved at:\n{backup}"
+            )
+
+        except Exception as exc:
+            messagebox.showerror(
+                "Migration Failed",
+                f"The CSV could not be migrated.\n\n{exc}\n\n"
+                "Your original file has not been replaced."
+            )
+            return pd.DataFrame(columns=COLUMNS)
+
+    # Validate current-format records.
+    try:
+        df = df[COLUMNS].copy()
+        df["ID"] = df["ID"].apply(normalize_id)
+        df["Name"] = df["Name"].fillna("").astype(str).str.strip()
+
+        if df["Name"].eq("").any():
+            raise ValueError("A student name is empty.")
+
+        if df["ID"].duplicated().any():
+            raise ValueError("Duplicate student IDs were found.")
+
+        for col in ["Attendance"] + SUBJECTS:
+            df[col] = pd.to_numeric(df[col], errors="raise")
+
+            if not df[col].between(0, 100).all():
+                raise ValueError(
+                    f"Values in {col} must be between 0 and 100."
+                )
+
+        return df.sort_values("ID").reset_index(drop=True)
+
+    except Exception as exc:
+        messagebox.showerror(
+            "Invalid Student Data",
+            f"The CSV contains invalid records:\n\n{exc}\n\n"
+            "The original CSV has not been overwritten."
+        )
+        return pd.DataFrame(columns=COLUMNS)
+
+
+def save_students():
+    """Write through a temporary file to reduce risk of partial writes."""
+    if students.empty:
+        if os.path.exists(CSV_FILE):
+            backup_csv()
+
+    temp_path = CSV_FILE + ".tmp"
+
+    try:
+        students[COLUMNS].to_csv(temp_path, index=False)
+        os.replace(temp_path, CSV_FILE)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+# ============================================================
+# RESULTS AND MACHINE LEARNING
+# ============================================================
+
+def percentage(row):
+    return float(np.mean([float(row[subject]) for subject in SUBJECTS]))
+
+
+def grade_for(score):
+    if score >= 90:
+        return "A+"
+    if score >= 80:
+        return "A"
+    if score >= 70:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 40:
+        return "D"
+    return "F"
+
+
+model = None
+model_metrics = None
+
+
+def train_model():
+    global model, model_metrics
+
+    model = None
+    model_metrics = None
+
+    if len(students) < 10:
+        return False
+
+    X = students[["Attendance"] + SUBJECTS].astype(float)
+    y = students[SUBJECTS].mean(axis=1)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    model = RandomForestRegressor(
+        n_estimators=150,
+        max_depth=8,
+        random_state=42
+    )
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_test)
+
+    model_metrics = {
+        "mae": mean_absolute_error(y_test, predictions),
+        "r2": r2_score(y_test, predictions)
+    }
+
+    return True
+
+
+students = load_students()
+train_model()
+
+
+# ============================================================
+# APPLICATION
+# ============================================================
+
+class StudentPerformanceApp(ctk.CTk):
+
+    def __init__(self):
+        super().__init__()
+
+        self.title("Student Performance AI")
+        self.geometry("1440x900")
+        self.minsize(1100, 700)
+        self.configure(fg_color=BG)
+
+        self.active_page = "Dashboard"
+        self.nav_buttons = {}
+
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        self.build_sidebar()
+        self.build_main_area()
+        self.show_page("Dashboard")
+
+    # --------------------------------------------------------
+    # UI HELPERS
+    # --------------------------------------------------------
+
+    def label(self, parent, text, size=13, color=TEXT,
+              weight="normal", **kwargs):
+        return ctk.CTkLabel(
+            parent,
+            text=text,
+            font=ctk.CTkFont(size=size, weight=weight),
+            text_color=color,
+            **kwargs
+        )
+
+    def button(self, parent, text, command, color=ACCENT,
+               hover="#5474E8", width=130):
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            fg_color=color,
+            hover_color=hover,
+            text_color=TEXT,
+            corner_radius=10,
+            height=38,
+            width=width,
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+
+    def card(self, parent):
+        return ctk.CTkFrame(
+            parent,
+            fg_color=PANEL,
+            corner_radius=15,
+            border_width=1,
+            border_color="#26334F"
+        )
+
+    def clear_content(self):
+        for widget in self.content.winfo_children():
+            widget.destroy()
+
+    def heading(self, title, subtitle):
+        self.label(
+            self.content, title, 27, TEXT, "bold"
+        ).pack(anchor="w", padx=25, pady=(22, 3))
+
+        self.label(
+            self.content, subtitle, 12, MUTED
+        ).pack(anchor="w", padx=26, pady=(0, 20))
+
+    def refresh_current_page(self):
+        self.show_page(self.active_page)
+
+    # --------------------------------------------------------
+    # SIDEBAR
+    # --------------------------------------------------------
+
+    def build_sidebar(self):
+        sidebar = ctk.CTkFrame(
+            self, width=230, corner_radius=0, fg_color=SIDEBAR
+        )
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_propagate(False)
+
+        self.label(
+            sidebar, "✦  STUDENT AI", 20, CYAN, "bold"
+        ).pack(anchor="w", padx=20, pady=(30, 5))
+
+        self.label(
+            sidebar, "PERFORMANCE INTELLIGENCE", 9, MUTED, "bold"
+        ).pack(anchor="w", padx=21, pady=(0, 30))
+
+        for name, symbol in [
+            ("Dashboard", "◈"),
+            ("Students", "▤"),
+            ("Analytics", "◉"),
+            ("Prediction", "✧")
+        ]:
+            btn = ctk.CTkButton(
+                sidebar,
+                text=f"    {symbol}    {name}",
+                anchor="w",
+                height=46,
+                corner_radius=10,
+                fg_color="transparent",
+                hover_color=PANEL2,
+                text_color=MUTED,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                command=lambda p=name: self.show_page(p)
+            )
+            btn.pack(fill="x", padx=13, pady=4)
+            self.nav_buttons[name] = btn
+
+        spacer = ctk.CTkFrame(sidebar, fg_color="transparent")
+        spacer.pack(fill="both", expand=True)
+
+        status_card = self.card(sidebar)
+        status_card.pack(fill="x", padx=13, pady=12)
+
+        self.label(
+            status_card, "MODEL STATUS", 10, MUTED, "bold"
+        ).pack(anchor="w", padx=12, pady=(13, 5))
+
+        status = "Ready" if model is not None else "Needs 10+ records"
+
+        self.label(
+            status_card, "●  " + status, 12,
+            GREEN if model is not None else PURPLE, "bold"
+        ).pack(anchor="w", padx=12, pady=(0, 13))
+
+        self.label(
+            sidebar, "Student Performance AI\nVersion 2.1",
+            10, MUTED, justify="left"
+        ).pack(anchor="w", padx=20, pady=(5, 20))
+
+    # --------------------------------------------------------
+    # MAIN AREA AND NAVIGATION
+    # --------------------------------------------------------
+
+    def build_main_area(self):
+        main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_rowconfigure(1, weight=1)
+        main.grid_columnconfigure(0, weight=1)
+
+        topbar = ctk.CTkFrame(main, fg_color=BG, height=60)
+        topbar.grid(row=0, column=0, sticky="ew", padx=25, pady=(10, 0))
+        topbar.grid_columnconfigure(0, weight=1)
+
+        self.top_title = self.label(topbar, "Dashboard", 18, TEXT, "bold")
+        self.top_title.grid(row=0, column=0, sticky="w", pady=12)
+
+        self.label(
+            topbar, datetime.now().strftime("%d %b %Y"), 12, MUTED
+        ).grid(row=0, column=1, sticky="e")
+
+        self.content = ctk.CTkScrollableFrame(
+            main, fg_color=BG, corner_radius=0
+        )
+        self.content.grid(
+            row=1, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8)
+        )
+
+    def show_page(self, page):
+        self.active_page = page
+
+        for name, btn in self.nav_buttons.items():
+            btn.configure(
+                fg_color="#26365B" if name == page else "transparent",
+                text_color=TEXT if name == page else MUTED
+            )
+
+        self.top_title.configure(text=page)
+        self.clear_content()
+
+        if page == "Dashboard":
+            self.page_dashboard()
+        elif page == "Students":
+            self.page_students()
+        elif page == "Analytics":
+            self.page_analytics()
+        elif page == "Prediction":
+            self.page_prediction()
+
+    # --------------------------------------------------------
+    # DASHBOARD
+    # --------------------------------------------------------
+
+    def page_dashboard(self):
+        self.heading(
+            "Welcome back.",
+            "Your student performance overview at a glance."
+        )
+
+        total = len(students)
+        avg = float(students[SUBJECTS].mean(axis=1).mean()) if total else 0
+        attendance = float(students["Attendance"].mean()) if total else 0
+        pass_rate = (
+            float((students[SUBJECTS].mean(axis=1) >= 40).mean() * 100)
+            if total else 0
+        )
+
+        hero = ctk.CTkFrame(
+            self.content,
+            fg_color="#192A4A",
+            corner_radius=18,
+            border_width=1,
+            border_color="#30446D"
+        )
+        hero.pack(fill="x", padx=22, pady=(0, 18))
+        hero.grid_columnconfigure(0, weight=1)
+
+        self.label(
+            hero, "STUDENT PERFORMANCE PREDICTION", 11, CYAN, "bold"
+        ).grid(row=0, column=0, sticky="w", padx=22, pady=(20, 6))
+
+        self.label(
+            hero, "Understand performance.\nMake better decisions.",
+            25, TEXT, "bold", justify="left"
+        ).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 8))
+
+        self.label(
+            hero,
+            "Manage student records, explore trends, and run an ML demo.",
+            12, MUTED
+        ).grid(row=2, column=0, sticky="w", padx=22, pady=(0, 20))
+
+        actions = ctk.CTkFrame(hero, fg_color="transparent")
+        actions.grid(row=0, column=1, rowspan=3, padx=22, pady=20)
+
+        self.button(
+            actions, "+ Add Student", self.add_student, width=145
+        ).pack(pady=5)
+
+        self.button(
+            actions, "View Analytics",
+            lambda: self.show_page("Analytics"),
+            color="#293A5A", hover="#354A70", width=145
+        ).pack(pady=5)
+
+        stats_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        stats_frame.pack(fill="x", padx=17, pady=(0, 18))
+
+        stats = [
+            ("TOTAL STUDENTS", str(total), "Registered records", ACCENT),
+            ("AVERAGE SCORE", f"{avg:.1f}%", "Across five subjects", CYAN),
+            ("AVG. ATTENDANCE", f"{attendance:.1f}%", "Attendance rate", PURPLE),
+            ("PASS RATE", f"{pass_rate:.1f}%", "Average score ≥ 40%", GREEN)
+        ]
+
+        for i, (title, value, detail, color) in enumerate(stats):
+            stats_frame.grid_columnconfigure(i, weight=1)
+            box = self.card(stats_frame)
+            box.grid(row=0, column=i, sticky="nsew", padx=5, pady=4)
+
+            self.label(
+                box, title, 10, MUTED, "bold"
+            ).pack(anchor="w", padx=14, pady=(15, 7))
+
+            self.label(
+                box, value, 25, color, "bold"
+            ).pack(anchor="w", padx=14)
+
+            self.label(
+                box, detail, 10, MUTED
+            ).pack(anchor="w", padx=14, pady=(5, 15))
+
+        lower = ctk.CTkFrame(self.content, fg_color="transparent")
+        lower.pack(fill="x", padx=22, pady=(0, 20))
+        lower.grid_columnconfigure(0, weight=3)
+        lower.grid_columnconfigure(1, weight=2)
+
+        recent = self.card(lower)
+        recent.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+
+        self.label(
+            recent, "Recent Students", 17, TEXT, "bold"
+        ).pack(anchor="w", padx=16, pady=(17, 5))
+
+        if students.empty:
+            self.label(
+                recent, "No student records yet.", 13, MUTED
+            ).pack(anchor="w", padx=16, pady=20)
+        else:
+            for _, row in students.tail(6).iloc[::-1].iterrows():
+                line = ctk.CTkFrame(
+                    recent, fg_color=PANEL2, corner_radius=8
+                )
+                line.pack(fill="x", padx=12, pady=3)
+                line.grid_columnconfigure(0, weight=1)
+
+                self.label(
+                    line, f"{row['Name']}  ·  ID {row['ID']}",
+                    12, TEXT, "bold"
+                ).grid(row=0, column=0, sticky="w", padx=10, pady=9)
+
+                self.label(
+                    line, f"{percentage(row):.1f}%", 12, CYAN, "bold"
+                ).grid(row=0, column=1, sticky="e", padx=10, pady=9)
+
+        model_card = self.card(lower)
+        model_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+
+        self.label(
+            model_card, "AI MODEL", 17, TEXT, "bold"
+        ).pack(anchor="w", padx=16, pady=(17, 8))
+
+        self.label(
+            model_card, "Random Forest Regressor", 13, CYAN, "bold"
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        if model_metrics:
+            detail = (
+                f"Test MAE: {model_metrics['mae']:.2f}\n"
+                f"Test R²: {model_metrics['r2']:.3f}\n\n"
+                "Model trained using current records."
+            )
+        else:
+            detail = "At least 10 valid student records are needed."
+
+        self.label(
+            model_card, detail, 12, MUTED, justify="left"
+        ).pack(anchor="w", padx=16, pady=(0, 15))
+
+        self.button(
+            model_card, "Retrain Model", self.retrain_model, width=145
+        ).pack(anchor="w", padx=16, pady=(0, 17))
+
+    # --------------------------------------------------------
+    # STUDENT MANAGEMENT
+    # --------------------------------------------------------
+
+    def page_students(self):
+        self.heading(
+            "Student records",
+            "Add, search, edit, delete, and manage student information."
+        )
+
+        toolbar = ctk.CTkFrame(self.content, fg_color="transparent")
+        toolbar.pack(fill="x", padx=22, pady=(0, 12))
+
+        self.search_var = tk.StringVar()
+
+        search = ctk.CTkEntry(
+            toolbar,
+            textvariable=self.search_var,
+            placeholder_text="Search student name or ID...",
+            height=40,
+            corner_radius=10,
+            fg_color=PANEL,
+            border_color="#2A3957"
+        )
+        search.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        search.bind("<KeyRelease>", lambda event: self.refresh_student_list())
+
+        self.button(
+            toolbar, "+ Add Student", self.add_student, width=135
+        ).pack(side="left", padx=4)
+
+        self.button(
+            toolbar, "Save CSV", self.export_csv,
+            color="#293A5A", hover="#354A70", width=100
+        ).pack(side="left", padx=4)
+
+        self.student_list = ctk.CTkScrollableFrame(
+            self.content, fg_color=PANEL, corner_radius=14
+        )
+        self.student_list.pack(
+            fill="both", expand=True, padx=22, pady=(0, 12)
+        )
+
+        self.refresh_student_list()
+
+    def refresh_student_list(self):
+        if not hasattr(self, "student_list"):
+            return
+
+        for widget in self.student_list.winfo_children():
+            widget.destroy()
+
+        header = ctk.CTkFrame(
+            self.student_list, fg_color=PANEL2, corner_radius=8
+        )
+        header.pack(fill="x", padx=6, pady=(6, 10))
+
+        for text, col in [
+            ("ID", 0), ("Student Name", 1), ("Attendance", 2),
+            ("Average", 3), ("Grade", 4), ("Action", 5)
+        ]:
+            self.label(
+                header, text, 11, MUTED, "bold"
+            ).grid(row=0, column=col, sticky="w", padx=10, pady=12)
+
+        header.grid_columnconfigure(1, weight=1)
+
+        query = self.search_var.get().strip().lower()
+        filtered = students.copy()
+
+        if query:
+            filtered = filtered[
+                filtered["Name"].str.lower().str.contains(query, na=False)
+                | filtered["ID"].astype(str).str.lower().str.contains(query, na=False)
+            ]
+
+        if filtered.empty:
+            self.label(
+                self.student_list,
+                "No matching students. Add a record to get started.",
+                14, MUTED
+            ).pack(pady=35)
+            return
+
+        for _, row in filtered.iterrows():
+            sid = str(row["ID"])
+            avg = percentage(row)
+
+            line = ctk.CTkFrame(
+                self.student_list, fg_color="#19253D", corner_radius=8
+            )
+            line.pack(fill="x", padx=6, pady=3)
+            line.grid_columnconfigure(1, weight=1)
+
+            self.label(
+                line, sid, 12, CYAN, "bold"
+            ).grid(row=0, column=0, sticky="w", padx=10, pady=11)
+
+            self.label(
+                line, str(row["Name"]), 12, TEXT
+            ).grid(row=0, column=1, sticky="w", padx=10, pady=11)
+
+            self.label(
+                line, f"{float(row['Attendance']):.1f}%", 12, MUTED
+            ).grid(row=0, column=2, sticky="w", padx=10, pady=11)
+
+            self.label(
+                line, f"{avg:.1f}%", 12, CYAN, "bold"
+            ).grid(row=0, column=3, sticky="w", padx=10, pady=11)
+
+            self.label(
+                line, grade_for(avg), 12,
+                GREEN if avg >= 40 else RED, "bold"
+            ).grid(row=0, column=4, sticky="w", padx=10, pady=11)
+
+            self.button(
+                line, "Open",
+                lambda r=row.copy(): self.edit_student(r),
+                color="#293A5A", hover="#354A70", width=65
+            ).grid(row=0, column=5, padx=8, pady=5)
+
+    # --------------------------------------------------------
+    # ADD / EDIT / DELETE
+    # --------------------------------------------------------
+
+    def add_student(self):
+        self.student_dialog()
+
+    def edit_student(self, row):
+        self.student_dialog(row)
+
+    def student_dialog(self, row=None):
+        editing = row is not None
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Edit Student" if editing else "Add Student")
+        dialog.geometry("760x700")
+        dialog.minsize(620, 600)
+        dialog.configure(fg_color=BG)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        outer = ctk.CTkScrollableFrame(dialog, fg_color=BG)
+        outer.pack(fill="both", expand=True, padx=16, pady=14)
+
+        self.label(
+            outer,
+            "Edit student record" if editing else "Add a new student",
+            23, TEXT, "bold"
+        ).pack(anchor="w", padx=7, pady=(5, 4))
+
+        self.label(
+            outer, "Enter student details and subject marks.",
+            12, MUTED
+        ).pack(anchor="w", padx=7, pady=(0, 15))
+
+        form = ctk.CTkFrame(outer, fg_color=PANEL, corner_radius=14)
+        form.pack(fill="x", padx=4, pady=4)
+        form.grid_columnconfigure(0, weight=1)
+        form.grid_columnconfigure(1, weight=1)
+
+        sid_var = tk.StringVar(value=str(row["ID"]) if editing else "")
+        name_var = tk.StringVar(value=str(row["Name"]) if editing else "")
+        attendance_var = tk.StringVar(
+            value=str(float(row["Attendance"])) if editing else "80"
+        )
+
+        mark_vars = {
+            subject: tk.StringVar(
+                value=str(float(row[subject])) if editing else "0"
+            )
+            for subject in SUBJECTS
+        }
+
+        def field(parent, label_text, variable, r, c):
+            cell = ctk.CTkFrame(parent, fg_color="transparent")
+            cell.grid(row=r, column=c, sticky="ew", padx=12, pady=8)
+
+            self.label(
+                cell, label_text, 11, MUTED, "bold"
+            ).pack(anchor="w", pady=(0, 5))
+
+            entry = ctk.CTkEntry(
+                cell,
+                textvariable=variable,
+                height=37,
+                corner_radius=8,
+                fg_color="#0E1729",
+                border_color="#2A3957",
+                text_color=TEXT
+            )
+            entry.pack(fill="x")
+            return entry
+
+        id_entry = field(form, "Student ID", sid_var, 0, 0)
+        field(form, "Student Name", name_var, 0, 1)
+        field(form, "Attendance (%)", attendance_var, 1, 0)
+
+        if editing:
+            id_entry.configure(state="disabled")
+
+        for i, subject in enumerate(SUBJECTS):
+            field(form, subject, mark_vars[subject], 2 + i // 2, i % 2)
+
+        button_row = ctk.CTkFrame(outer, fg_color="transparent")
+        button_row.pack(fill="x", padx=4, pady=15)
+
+        def save_record():
+            global students
+
+            try:
+                sid = normalize_id(sid_var.get())
+                name = name_var.get().strip()
+                attendance = float(attendance_var.get())
+
+                marks = {
+                    subject: float(mark_vars[subject].get())
+                    for subject in SUBJECTS
+                }
+
+                if not name:
+                    raise ValueError("Student name cannot be empty.")
+
+                if not 0 <= attendance <= 100:
+                    raise ValueError("Attendance must be between 0 and 100.")
+
+                for subject, mark in marks.items():
+                    if not 0 <= mark <= 100:
+                        raise ValueError(
+                            f"{subject} must be between 0 and 100."
+                        )
+
+                existing_ids = students["ID"].astype(str).str.strip().tolist()
+
+                if not editing and sid in existing_ids:
+                    raise ValueError("That student ID already exists.")
+
+                record = {
+                    "ID": sid,
+                    "Name": name,
+                    "Attendance": attendance,
+                    **marks
+                }
+
+                previous = students.copy()
+
+                if editing:
+                    old_id = str(row["ID"])
+                    students.loc[
+                        students["ID"].astype(str) == old_id, COLUMNS
+                    ] = [record[col] for col in COLUMNS]
+                else:
+                    students = pd.concat(
+                        [
+                            students,
+                            pd.DataFrame([record], columns=COLUMNS)
+                        ],
+                        ignore_index=True
+                    )
+
+                students = students.sort_values("ID").reset_index(drop=True)
+
+                try:
+                    save_students()
+                except Exception:
+                    students = previous
+                    raise
+
+                train_model()
+                dialog.destroy()
+                self.refresh_current_page()
+
+                messagebox.showinfo(
+                    "Saved", "Student record saved successfully."
+                )
+
+            except Exception as exc:
+                messagebox.showerror(
+                    "Invalid Input", str(exc), parent=dialog
+                )
+
+        self.button(
+            button_row, "Save Record", save_record, width=140
+        ).pack(side="right", padx=4)
+
+        self.button(
+            button_row, "Cancel", dialog.destroy,
+            color="#293A5A", hover="#354A70", width=95
+        ).pack(side="right", padx=4)
+
+        if editing:
+            self.button(
+                button_row, "Delete Student",
+                lambda: self.delete_student(str(row["ID"]), dialog),
+                color="#9F334D", hover="#7D293E", width=140
+            ).pack(side="left", padx=4)
+
+    def delete_student(self, sid, dialog=None):
+        global students
+
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete student ID {sid}?\nThis change will be saved to the CSV."
+        ):
+            return
+
+        previous = students.copy()
+        students = students[
+            students["ID"].astype(str).str.strip() != sid
+        ].reset_index(drop=True)
+
+        try:
+            save_students()
+            train_model()
+        except Exception as exc:
+            students = previous
+            messagebox.showerror("Delete Failed", str(exc))
+            return
+
+        if dialog:
+            dialog.destroy()
+
+        self.refresh_current_page()
+        messagebox.showinfo("Deleted", f"Student ID {sid} was deleted.")
+
+    def export_csv(self):
+        try:
+            save_students()
+            messagebox.showinfo(
+                "CSV Saved", f"Saved to:\n{CSV_FILE}"
+            )
+        except Exception as exc:
+            messagebox.showerror("Save Error", str(exc))
+
+    # --------------------------------------------------------
+    # ANALYTICS
+    # --------------------------------------------------------
+
+    def page_analytics(self):
+        self.heading(
+            "Analytics studio",
+            "Explore subject averages, student results, and attendance trends."
+        )
+
+        toolbar = self.card(self.content)
+        toolbar.pack(fill="x", padx=22, pady=(0, 12))
+
+        self.label(
+            toolbar, "Visualization", 13, TEXT, "bold"
+        ).pack(side="left", padx=15, pady=13)
+
+        self.chart_choice = tk.StringVar(value="Subject Averages")
+
+        ctk.CTkOptionMenu(
+            toolbar,
+            values=[
+                "Subject Averages",
+                "Student Performance",
+                "Percentage Distribution",
+                "Attendance vs Performance"
+            ],
+            variable=self.chart_choice,
+            command=self.draw_chart,
+            fg_color="#293A5A",
+            button_color=ACCENT,
+            button_hover_color="#5474E8",
+            dropdown_fg_color=PANEL,
+            width=245
+        ).pack(side="right", padx=15, pady=10)
+
+        self.chart_container = self.card(self.content)
+        self.chart_container.pack(
+            fill="both", expand=True, padx=22, pady=(0, 20)
+        )
+
+        self.draw_chart("Subject Averages")
+
+    def draw_chart(self, chart_type):
+        for widget in self.chart_container.winfo_children():
+            widget.destroy()
+
+        if students.empty:
+            self.label(
+                self.chart_container,
+                "Add student records to generate analytics.",
+                14, MUTED
+            ).pack(pady=60)
+            return
+
+        fig, ax = plt.subplots(figsize=(10, 5.5), dpi=100)
+        fig.patch.set_facecolor(PANEL)
+        ax.set_facecolor(PANEL)
+        ax.tick_params(colors=TEXT, labelsize=9)
+
+        for spine in ax.spines.values():
+            spine.set_color("#394864")
+
+        ax.grid(axis="y", alpha=0.2)
+
+        if chart_type == "Subject Averages":
+            values = students[SUBJECTS].mean()
+            ax.bar(
+                ["DSA", "Python", "DLM", "COA", "Discrete"],
+                values.values
+            )
+            ax.set_title("Average Marks by Subject", color=TEXT, pad=16)
+            ax.set_ylabel("Average marks (%)", color=TEXT)
+
+        elif chart_type == "Student Performance":
+            data = students.copy()
+            data["Average"] = data[SUBJECTS].mean(axis=1)
+            data = data.nlargest(min(15, len(data)), "Average")
+
+            ax.barh(data["Name"], data["Average"])
+            ax.invert_yaxis()
+            ax.set_title("Top Student Performance", color=TEXT, pad=16)
+            ax.set_xlabel("Average marks (%)", color=TEXT)
+            ax.grid(axis="x", alpha=0.2)
+            ax.grid(axis="y", visible=False)
+
+        elif chart_type == "Percentage Distribution":
+            scores = students[SUBJECTS].mean(axis=1)
+            ax.hist(scores, bins=10, edgecolor=TEXT)
+            ax.set_title("Student Score Distribution", color=TEXT, pad=16)
+            ax.set_xlabel("Average marks (%)", color=TEXT)
+            ax.set_ylabel("Number of students", color=TEXT)
+
+        elif chart_type == "Attendance vs Performance":
+            scores = students[SUBJECTS].mean(axis=1)
+            ax.scatter(students["Attendance"], scores, alpha=0.8, s=45)
+            ax.set_title("Attendance vs Performance", color=TEXT, pad=16)
+            ax.set_xlabel("Attendance (%)", color=TEXT)
+            ax.set_ylabel("Average marks (%)", color=TEXT)
+
+        fig.tight_layout(pad=2)
+
+        canvas = FigureCanvasTkAgg(fig, master=self.chart_container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(
+            fill="both", expand=True, padx=8, pady=8
+        )
+
+        plt.close(fig)
+
+    # --------------------------------------------------------
+    # PREDICTION
+    # --------------------------------------------------------
+
+    def page_prediction(self):
+        self.heading(
+            "Performance prediction",
+            "Enter attendance and subject marks to run the ML demo model."
+        )
+
+        wrapper = ctk.CTkFrame(self.content, fg_color="transparent")
+        wrapper.pack(fill="x", padx=22, pady=(0, 20))
+        wrapper.grid_columnconfigure(0, weight=3)
+        wrapper.grid_columnconfigure(1, weight=2)
+
+        input_card = self.card(wrapper)
+        input_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+
+        result_card = self.card(wrapper)
+        result_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+
+        self.label(
+            input_card, "Student inputs", 18, TEXT, "bold"
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+
+        self.label(
+            input_card, "All values must be between 0 and 100.",
+            11, MUTED
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        self.prediction_vars = {}
+
+        def prediction_field(label_text, key, default):
+            frame = ctk.CTkFrame(input_card, fg_color="transparent")
+            frame.pack(fill="x", padx=18, pady=6)
+
+            self.label(
+                frame, label_text, 11, MUTED, "bold"
+            ).pack(anchor="w", pady=(0, 4))
+
+            variable = tk.StringVar(value=str(default))
+
+            ctk.CTkEntry(
+                frame,
+                textvariable=variable,
+                height=36,
+                corner_radius=8,
+                fg_color="#0E1729",
+                border_color="#2A3957"
+            ).pack(fill="x")
+
+            self.prediction_vars[key] = variable
+
+        prediction_field("Attendance (%)", "Attendance", 80)
+
+        for subject in SUBJECTS:
+            prediction_field(subject, subject, 70)
+
+        self.button(
+            input_card, "Predict Performance",
+            self.run_prediction, width=200
+        ).pack(anchor="w", padx=18, pady=(15, 20))
+
+        self.label(
+            result_card, "PREDICTED SCORE", 11, MUTED, "bold"
+        ).pack(anchor="w", padx=20, pady=(22, 12))
+
+        self.prediction_result = self.label(
+            result_card, "--%", 39, CYAN, "bold"
+        )
+        self.prediction_result.pack(anchor="w", padx=20, pady=(0, 5))
+
+        self.prediction_grade = self.label(
+            result_card, "Awaiting inputs", 15, TEXT, "bold"
+        )
+        self.prediction_grade.pack(anchor="w", padx=20, pady=(0, 15))
+
+        self.prediction_description = self.label(
+            result_card,
+            "Enter values and select Predict Performance.\n\n"
+            "This is a demonstration estimate, not a guarantee "
+            "of a student's future result.",
+            12, MUTED, justify="left", wraplength=300
+        )
+        self.prediction_description.pack(
+            anchor="w", padx=20, pady=(0, 20)
+        )
+
+        self.button(
+            result_card, "Retrain Model",
+            self.retrain_model,
+            color="#293A5A", hover="#354A70", width=145
+        ).pack(anchor="w", padx=20, pady=(0, 20))
+
+    def run_prediction(self):
+        if model is None:
+            messagebox.showwarning(
+                "Model Not Ready",
+                "At least 10 valid student records are needed to train the model."
+            )
+            return
+
+        try:
+            values = {
+                key: float(variable.get())
+                for key, variable in self.prediction_vars.items()
+            }
+
+            for key, value in values.items():
+                if not 0 <= value <= 100:
+                    raise ValueError(f"{key} must be between 0 and 100.")
+
+            input_df = pd.DataFrame(
+                [[values["Attendance"]] + [values[s] for s in SUBJECTS]],
+                columns=["Attendance"] + SUBJECTS
+            )
+
+            predicted = float(model.predict(input_df)[0])
+            predicted = max(0, min(100, predicted))
+
+            self.prediction_result.configure(text=f"{predicted:.1f}%")
+            self.prediction_grade.configure(
+                text=f"Estimated Grade: {grade_for(predicted)}"
+            )
+
+            self.prediction_description.configure(
+                text=(
+                    "Prediction generated.\n\n"
+                    f"Attendance: {values['Attendance']:.1f}%\n"
+                    f"Estimated score: {predicted:.1f}%\n\n"
+                    "For reliable future-performance prediction, train "
+                    "with previous-term information and a separate "
+                    "future-term outcome."
+                )
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Prediction Error", str(exc))
+
+    def retrain_model(self):
+        train_model()
+        self.show_page(self.active_page)
+
+        if model is not None:
+            messagebox.showinfo(
+                "Model Updated",
+                "The Random Forest model has been retrained."
+            )
+        else:
+            messagebox.showwarning(
+                "Not Enough Data",
+                "At least 10 valid student records are needed."
+            )
+
+
+# ============================================================
+# RUN APPLICATION
+# ============================================================
+
+if __name__ == "__main__":
+    app = StudentPerformanceApp()
+    app.mainloop()
